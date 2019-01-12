@@ -1,0 +1,41 @@
+# Support for OpenBMC Rest Interface
+#
+# Powerman.conf should look something like this:
+#   include "/etc/powerman/openbmc.dev"
+#   device "openbmc1" "openbmc" "/usr/sbin/httppower -u https://192.168.0.100 -H Content-Type:application/json -c |&"
+#   node "node[1-8]" "openbmc1" "pnode[1-8]"
+#
+specification "openbmc" {
+	timeout 	30
+
+# login uses openbmc default, adjust if necessary
+	script login {
+		expect "httppower> "
+		send "post login {\"data\":[\"root\",\"0penBmc\"]}\n"
+		expect "httppower> "
+	}
+	script logout {
+		send "post logout {\"data\":[]}\n"
+		expect "httppower> "
+		send "quit\n"
+	}
+	script status {
+		send "get xyz/openbmc_project/state/chassis0/attr/CurrentPowerState\n"
+	        expect "xyz.openbmc_project.State.Chassis.PowerState.(On|Off)"
+                setplugstate $1 on="On" off="Off"
+		expect "httppower> "
+	}
+	script on {
+		send "put xyz/openbmc_project/state/host0/attr/RequestedHostTransition {\"data\":\"xyz.openbmc_project.State.Host.Transition.On\"}\n"
+		expect "httppower> "
+	}
+# this is a soft power off, hard power off will bring down the bmc
+	script off {
+		send "put xyz/openbmc_project/state/host0/attr/RequestedHostTransition {\"data\":\"xyz.openbmc_project.State.Host.Transition.Off\"}\n"
+		expect "httppower> "
+	}
+	script cycle {
+		send "put xyz/openbmc_project/state/host0/attr/RequestedHostTransition {\"data\":\"xyz.openbmc_project.State.Host.Transition.Reboot\"}\n"
+		expect "httppower> "
+	}
+}
