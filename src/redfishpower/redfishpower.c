@@ -45,6 +45,9 @@ static char *offpostdata = NULL;
 static char *cyclepath = NULL;
 static char *cyclepostdata = NULL;
 
+/* XXX */
+int test_status_first = 1;
+
 /* in seconds */
 #define MESSAGE_TIMEOUT            10
 #define CMD_TIMEOUT_DEFAULT        60
@@ -62,6 +65,7 @@ static char *cyclepostdata = NULL;
 #define MS_IN_SEC                1000
 
 enum {
+      STATE_PRE_REQ_STATUS_CHECK, /* stat, on, off */
       STATE_SEND_POWERCMD,      /* stat, on, off */
       STATE_WAIT_UNTIL_ON_OFF,  /* on, off */
 };
@@ -293,16 +297,19 @@ cleanup:
     return rv;
 }
 
-static struct powermsg *stat_cmd_host(CURLM * mh, char *hostname)
+static struct powermsg *stat_cmd_host(CURLM * mh,
+                                      char *hostname,
+                                      const char *cmd,
+                                      int state)
 {
     struct powermsg *pm = powermsg_create(mh,
                                           hostname,
-                                          "stat",
+                                          cmd,
                                           statpath,
                                           NULL,
                                           NULL,
                                           0,
-                                          STATE_SEND_POWERCMD);
+                                          state);
 
     Curl_easy_setopt((pm->eh, CURLOPT_HTTPGET, 1));
     return pm;
@@ -332,7 +339,18 @@ static void stat_cmd(List activecmds, CURLM *mh, char **av)
         err_exit(true, "hostlist_iterator_create");
 
     while ((hostname = hostlist_next(itr))) {
-        struct powermsg *pm = stat_cmd_host(mh, hostname);
+        struct powermsg *pm;
+
+        if (test_status_first)
+            pm = stat_cmd_host(mh,
+                               hostname,
+                               "stat",
+                               STATE_PRE_REQ_STATUS_CHECK);
+        else
+            pm = stat_cmd_host(mh,
+                               hostname,
+                               "stat",
+                               STATE_SEND_POWERCMD);
         if (!list_append(activecmds, pm))
             err_exit(true, "list_append");
         free(hostname);
@@ -377,11 +395,37 @@ static void parse_onoff (struct powermsg *pm, const char **strp)
         (*strp) = "no output error";
 }
 
-static void stat_process (struct powermsg *pm)
+static void stat_process (List activecmds, struct powermsg *pm)
 {
-    const char *str;
-    parse_onoff(pm, &str);
-    printf("%s: %s\n", pm->hostname, str);
+    if (pm->state == STATE_PRE_REQ_STATUS_CHECK) {
+        const char *str;
+        struct powermsg *nextpm;
+
+        parse_onoff(pm, &str);
+
+        /* XXX say is off? */
+        if (strcmp(str, "off") == 0) {
+            printf("%s: %s\n", pm->hostname, "pre-req off");
+            return;
+        }
+        else if (strcmp(str, "unknown") == 0) {
+            printf("%s: %s\n", pm->hostname, "pre-req fail");
+            return;
+        }
+        /* else is on */
+
+        nextpm = stat_cmd_host(pm->mh,
+                               pm->hostname,
+                               "stat",
+                               STATE_SEND_POWERCMD);
+        if (!list_append(activecmds, nextpm))
+            err_exit(true, "list_append");
+    }
+    else if (pm->state == STATE_SEND_POWERCMD) {
+        const char *str;
+        parse_onoff(pm, &str);
+        printf("%s: %s\n", pm->hostname, str);
+    }
 }
 
 static void stat_cleanup(struct powermsg *pm)
@@ -444,7 +488,19 @@ static void power_cmd(List activecmds,
         err_exit(true, "hostlist_iterator_create");
 
     while ((hostname = hostlist_next(itr))) {
-        struct powermsg *pm = power_cmd_host(mh, hostname, cmd, path, postdata);
+        struct powermsg *pm;
+
+        if (test_status_first)
+            pm = stat_cmd_host(mh,
+                               hostname,
+                               cmd,
+                               STATE_PRE_REQ_STATUS_CHECK);
+        else
+            pm = power_cmd_host(mh,
+                                hostname,
+                                cmd,
+                                path,
+                                postdata);
         if (!list_append(activecmds, pm))
             err_exit(true, "list_append");
         free(hostname);
@@ -499,9 +555,38 @@ static void send_status_poll(List delayedcmds, struct powermsg *pm)
         err_exit(true, "list_append");
 }
 
-static void on_off_process(List delayedcmds, struct powermsg *pm)
+static void on_off_process(List activecmds,
+                           List delayedcmds,
+                           struct powermsg *pm,
+                           const char *path,
+                           const char *postdata)
 {
-    if (pm->state == STATE_SEND_POWERCMD) {
+    if (pm->state == STATE_PRE_REQ_STATUS_CHECK) {
+        const char *str;
+        struct powermsg *nextpm;
+
+        parse_onoff(pm, &str);
+
+        if (strcmp(str, "off") == 0) {
+            printf("%s: %s\n", pm->hostname, "pre-req off");
+            return;
+        }
+        else if (strcmp(str, "unknown") == 0) {
+            printf("%s: %s\n", pm->hostname, "pre-req fail");
+            return;
+        }
+        /* else is on */
+
+        /* power_cmd_host sets next state as STATE_SEND_POWERCMD */
+        nextpm = power_cmd_host(pm->mh,
+                                pm->hostname,
+                                pm->cmd,
+                                path,
+                                postdata);
+        if (!list_append(activecmds, nextpm))
+            err_exit(true, "list_append");
+    }
+    else if (pm->state == STATE_SEND_POWERCMD) {
         /* just sent on or off, now we need for the operation to
          * complete
          */
@@ -530,14 +615,14 @@ static void on_off_process(List delayedcmds, struct powermsg *pm)
 
 }
 
-static void on_process(List delayedcmds, struct powermsg *pm)
+static void on_process(List activecmds, List delayedcmds, struct powermsg *pm)
 {
-    on_off_process(delayedcmds, pm);
+    on_off_process(activecmds, delayedcmds, pm, onpath, onpostdata);
 }
 
-static void off_process(List delayedcmds, struct powermsg *pm)
+static void off_process(List activecmds, List delayedcmds, struct powermsg *pm)
 {
-    on_off_process(delayedcmds, pm);
+    on_off_process(activecmds, delayedcmds, pm, offpath, offpostdata);
 }
 
 static void cycle_process(struct powermsg *pm)
@@ -864,11 +949,11 @@ static void shell(CURLM *mh)
                     }
                     else {
                         if (strcmp(pm->cmd, "stat") == 0)
-                            stat_process(pm);
+                            stat_process(activecmds, pm);
                         else if (strcmp(pm->cmd, "on") == 0)
-                            on_process(delayedcmds, pm);
+                            on_process(activecmds, delayedcmds, pm);
                         else if (strcmp(pm->cmd, "off") == 0)
-                            off_process(delayedcmds, pm);
+                            off_process(activecmds, delayedcmds, pm);
                         else if (strcmp(pm->cmd, "cycle") == 0)
                             cycle_process(pm);
                     }
