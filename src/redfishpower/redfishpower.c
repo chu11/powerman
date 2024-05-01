@@ -74,6 +74,7 @@ static zhashx_t *test_power_status;
 static zhashx_t *resolve_hosts_cache = NULL;
 
 /* in seconds */
+#define CONNECTION_TIMEOUT_DEFAULT 2
 #define MESSAGE_TIMEOUT_DEFAULT    5
 #define CMD_TIMEOUT_DEFAULT        60
 
@@ -160,6 +161,7 @@ static struct option longopts[] = {
         {"offpath", required_argument, 0, 'F' },
         {"onpostdata", required_argument, 0, 'P' },
         {"offpostdata", required_argument, 0, 'G' },
+        {"connection-timeout", required_argument, 0, 'c' },
         {"message-timeout", required_argument, 0, 'm' },
         {"resolve-hosts", no_argument, 0, 'o' },
         {"test-mode", no_argument, 0, 'T' },
@@ -173,6 +175,7 @@ static time_t cmd_timeout = CMD_TIMEOUT_DEFAULT;
  * so use 'long int' instead
  */
 static long int status_polling_interval = STATUS_POLLING_INTERVAL_DEFAULT;
+static long connection_timeout = CONNECTION_TIMEOUT_DEFAULT;
 static long message_timeout = MESSAGE_TIMEOUT_DEFAULT;
 
 void help(void)
@@ -285,8 +288,10 @@ static void powermsg_init_curl(struct powermsg *pm)
     if ((pm->eh = curl_easy_init()) == NULL)
         err_exit(false, "curl_easy_init failed");
 
-    /* Per documentation, CURLOPT_TIMEOUT overrides
-     * CURLOPT_CONNECTTIMEOUT */
+    /* if CURLOPT_CONNECTTIMEOUT > CURLOPT_TIMEOUT, CURLOPT_TIMEOUT overrides
+     * CURLOPT_CONNECTTIMEOUT
+     */
+    Curl_easy_setopt((pm->eh, CURLOPT_CONNECTTIMEOUT, connection_timeout));
     Curl_easy_setopt((pm->eh, CURLOPT_TIMEOUT, message_timeout));
     Curl_easy_setopt((pm->eh, CURLOPT_FAILONERROR, 1));
 
@@ -1777,15 +1782,16 @@ static void usage(void)
     fprintf(stderr,
       "Usage: redfishpower --hostname host(s) [OPTIONS]\n"
       "  OPTIONS:\n"
-      "  -H, --header          Set extra header string\n"
-      "  -S, --statpath        Set stat path\n"
-      "  -O, --onpath          Set on path\n"
-      "  -F, --offpath         Set off path\n"
-      "  -P, --onpostdata      Set on post data\n"
-      "  -G, --offpostdata     Set off post data\n"
-      "  -m, --message-timeout Set message timeout\n"
-      "  -o, --resolve-hosts   Resolve host to IP before passing to libcurl\n"
-      "  -v, --verbose         Increase output verbosity\n"
+      "  -H, --header             Set extra header string\n"
+      "  -S, --statpath           Set stat path\n"
+      "  -O, --onpath             Set on path\n"
+      "  -F, --offpath            Set off path\n"
+      "  -P, --onpostdata         Set on post data\n"
+      "  -G, --offpostdata        Set off post data\n"
+      "  -c, --connection-timeout Set message timeout\n"
+      "  -m, --message-timeout    Set message timeout\n"
+      "  -o, --resolve-hosts      Resolve host to IP before passing to libcurl\n"
+      "  -v, --verbose            Increase output verbosity\n"
     );
     exit(1);
 }
@@ -1929,6 +1935,14 @@ int main(int argc, char *argv[])
             case 'G': /* --offpostdata */
                 offpostdata = xstrdup(optarg);
                 break;
+            case 'c': /* --connection-timeout */
+                errno = 0;
+                connection_timeout = strtol(optarg, &endptr, 10);
+                if (errno
+                    || endptr[0] != '\0'
+                    || connection_timeout <= 0)
+                    err_exit(false, "invalid connection timeout specified\n");
+                break;
             case 'm': /* --message-timeout */
                 errno = 0;
                 message_timeout = strtol(optarg, &endptr, 10);
@@ -1994,6 +2008,8 @@ int main(int argc, char *argv[])
             fprintf(stderr, "command line option: header = %s\n", header);
         if (userpwd)
             fprintf(stderr, "command line option: auth = %s\n", userpwd);
+        if (connection_timeout != CONNECTION_TIMEOUT_DEFAULT)
+            fprintf(stderr, "command line option: connection timeout = %ld\n", connection_timeout);
         if (message_timeout != MESSAGE_TIMEOUT_DEFAULT)
             fprintf(stderr, "command line option: message timeout = %ld\n", message_timeout);
         fprintf(stderr, "command line option: resolve-hosts = %s\n",
